@@ -36,8 +36,13 @@ export default function devalue(value: any) {
 			const type = getType(thing);
 
 			switch (type) {
-				case 'Number':
 				case 'String':
+					// Count the boxed primitive, so that a long string shared by many
+					// distinct boxes is hoisted once instead of inlined for every box
+					walk(thing.valueOf());
+					return;
+
+				case 'Number':
 				case 'Boolean':
 				case 'Date':
 				case 'RegExp':
@@ -216,6 +221,7 @@ export default function devalue(value: any) {
 
 	if (names.size) {
 		const params: string[] = [];
+		const reconstructions: string[] = [];
 		const statements: string[] = [];
 		const values: string[] = [];
 
@@ -232,9 +238,18 @@ export default function devalue(value: any) {
 			switch (type) {
 				case 'Number':
 				case 'String':
-				case 'Boolean':
-					values.push(`Object(${stringify(thing.valueOf())})`);
+				case 'Boolean': {
+					const primitive = thing.valueOf();
+					if (names.has(primitive)) {
+						// A hoisted primitive is only in scope inside the IIFE, not in
+						// its arguments. Reconstruct the box before assigning references.
+						values.push('{}');
+						reconstructions.push(`${name}=Object(${stringify(primitive)})`);
+					} else {
+						values.push(`Object(${stringify(primitive)})`);
+					}
 					break;
+				}
 
 				case 'RegExp':
 					values.push(thing.toString());
@@ -281,7 +296,16 @@ export default function devalue(value: any) {
 
 		statements.push(`return ${str}`);
 
-		return `(function(${params.join(',')}){${statements.join(';')}}(${values.join(',')}))`
+		const body = reconstructions.concat(statements).join(';');
+		// A function may have at most 65535 parameters (and a call at most that
+		// many arguments). For very large graphs, pass the hoisted values as a
+		// single array argument and destructure them into the placeholder names,
+		// so the emitted code stays within the engine limit (#93).
+		if (params.length > 65534) {
+			return `(function(){var[${params.join(',')}]=arguments[0];${body}}([${values.join(',')}]))`;
+		}
+
+		return `(function(${params.join(',')}){${body}}(${values.join(',')}))`
 	} else {
 		return str;
 	}
@@ -295,7 +319,7 @@ function getName(num: number) {
 		num = ~~(num / chars.length) - 1;
 	} while (num >= 0);
 
-	return reserved.test(name) ? `${name}_` : name;
+	return reserved.test(name) ? `${name}0` : name;
 }
 
 function isPrimitive(thing: any) {
